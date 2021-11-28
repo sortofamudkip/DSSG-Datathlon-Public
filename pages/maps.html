@@ -1,0 +1,280 @@
+<!-- Written by Jake for DSSG 2021 Berlin. -->
+<!-- It is highly recommended to read the README.md for more information. -->
+
+<html>
+    <head>
+        <title> Bikes 🚲 and Viruses 🦠</title>
+
+        <!-- Favicon from https://favicon.io/emoji-favicons/bicycle -->
+        <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}">
+        
+        <!-- Leaflet CSS -->
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"
+            integrity="sha512-xodZBNTC5n17Xt2atTPuE1HxjVMSvLVW9ocqUKLsCC5CXdbqCmblAshOMAS6/keqq/sMZMZ19scR4PsZChSR7A=="
+            crossorigin="" />
+
+        <!-- font-awesome icons -->
+        <link rel="stylesheet" href="https://pro.fontawesome.com/releases/v5.10.0/css/all.css"
+            integrity="sha384-AYmEC3Yw5cVb3ZcuHtOA93w35dYTsvhLPVnYs9eStHfGJvOvKxVfELGroGkvsg+p" crossorigin="anonymous" />
+
+
+        <!-- Leaflet JS; Make sure you put this AFTER Leaflet's CSS -->
+        <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"
+        integrity="sha512-XQoYMqMTK8LvdxXYG3nZ448hOEQiglfqkJs1NOQV44cWnUrBc8PkAOcXy20w0vlaXaVUearIOBhiXZ5V3ynxwA=="
+        crossorigin=""></script>
+        
+        <!-- JQuery -->
+        <script src="https://code.jquery.com/jquery-3.6.0.min.js" integrity="sha256-/xUj+3OJU5yExlq6GSYGSHk7tPXikynS7ogEvDej/m4=" crossorigin="anonymous"></script>
+        <!-- JQuery UI (for slider) -->
+        <script src="//code.jquery.com/ui/1.11.2/jquery-ui.js"></script>
+        <link rel="stylesheet" href="https://code.jquery.com/ui/1.10.2/themes/smoothness/jquery-ui.css" />
+        
+        <!-- jquery-csv package (https://github.com/evanplaice/jquery-csv) -->
+        <script src=" {{url_for('static', filename='jquery.csv.min.js')}}"></script>
+
+
+        <style>
+            /* Leaflet map */
+            #map { height: 90%; } 
+
+            /* Slider */
+            #covid-slider-range {
+                z-index: 100;
+            }
+
+            /* Font-awesome's bike 🚲 icon */
+            .custom-div-icon {
+                font-size: 300%;
+                color: green;
+            }
+
+            /* Leaflet tooltip for each borough's incidence rate */
+            .district-tooltip {
+                background-color: lightyellow;
+            }
+
+            /* Leaflet tooltip for each bike station's rider statistics */
+            .bike-tooltip {
+                background-color: lightgreen;
+            }
+
+            /* Slider CSS */
+            #covid-slider-range {
+                background: yellow;
+                margin-top: 10px;
+            }
+
+            /* Slider handle CSS */
+            #custom-handle {
+                background: black;
+            }
+        </style>
+
+    </head>
+    <body>
+        <!-- The map -->
+        <div id="map"></div>
+
+        <!-- The slider and its handle -->
+        <div id="covid-slider-range">
+            <div id="custom-handle" class="ui-slider-handle"></div>
+        </div>
+
+        <!-- Additional statistics. Here the starting date is 2016-01-01 which is the date of the earliest statistics (i.e. bike count). -->
+        <div style="margin-top: 2px;"> Date: <span id="starting-date">2016-01-01</span> <button type="button" id="jump-to-covid-start">Jump to COVID start</button> </div> 
+        <div id="total-incidence-rate">Total incidence rate: N/A</div>
+        
+        <script>
+            // Creates the Leaflet map
+            function create_map() {
+                // Coordiates of the center of the map
+                let BERLIN_LATLONG = [52.5140658632566, 13.41775102070807];
+                // L is Leaflet's class; L.map() creates the map, while setView sets the center of the map and the zoom level
+                let mymap = L.map('map').setView(BERLIN_LATLONG, 11); 
+                // Draws the actual world; copied from https://leafletjs.com/examples/quick-start/
+                L.tileLayer('https://api.mapbox.com/styles/v1/{id}/tiles/{z}/{x}/{y}?access_token={accessToken}', {
+                        attribution: 'Map data &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, Imagery © <a href="https://www.mapbox.com/">Mapbox</a>',
+                        maxZoom: 18,
+                        id: 'mapbox/streets-v11',
+                        tileSize: 512,
+                        zoomOffset: -1,
+                        accessToken: 'pk.eyJ1IjoiamFhYWFhYWFhYWFha2UiLCJhIjoiY2t3N283cnJpMXYxNDJ3cDYwY3NlbTJ4NSJ9.GqyzeCyIgcJOEU3GfYEmkw' // access token must be acquired separately
+                    }).addTo(mymap);
+                return mymap;
+            }
+
+            // Generates the popup text when a bike station is clicked
+            function pin_popup_info(station) {
+                return `${station.city} ${station.number} (${station.name})`;
+            }
+
+            // auxillary functions for dates
+            function treatAsUTC(date) {
+                var result = new Date(date);
+                result.setMinutes(result.getMinutes() - result.getTimezoneOffset());
+                return result;
+            }
+            
+            // auxillary functions for dates: counts amount of days between two dates
+            function daysBetween(startDate, endDate) {
+                var millisecondsPerDay = 24 * 60 * 60 * 1000;
+                return (treatAsUTC(endDate) - treatAsUTC(startDate)) / millisecondsPerDay;
+            }
+
+            // global variables for script. There is probably a cleaner way to write this.
+            var map = null;                       // Leaflet's map
+            var markers = null;                   // bike markers 
+            var berlin_districts_polygons = null; // the polygons the outline each borough
+            var berlin_covid = null;              // incidence rate of each borough and total incidence rate (of every day)
+            // var berlin_riders = null;          // unused
+            var daily_riders = null;              // number of bikers at each station (of every day)
+            var id_to_markers_map = {};           // Mapping of each bike station's name to the marker itself (i.e. {marker.idname : marker})
+
+            // Obtain bike data, create map, and plot bike information onto the map
+            let bike_promise = $.get("{{ url_for('static', filename='fetched_eco_bike_data-overall_germany.csv') }}", function (data) {
+                map = create_map();
+                const stations_data = $.csv.toObjects(data); // convert csv to JS-friendly format
+                // Obtain only bike rider information for Berlin.
+                // Note that if information for more cities are to be shown, the corresponding data should be loaded and processed before removing the .filter() function.
+                const berlin_stations_data = stations_data.filter(data => data["city"] == "Berlin"); 
+                // custom Leaflet icon for the bike 🚲
+                let icon = L.divIcon({
+                    className: "custom-div-icon",
+                    html: '<i class="fas fa-bicycle"></i>',
+                    iconSize: [30, 42],
+                });
+                // plot each marker, add tooltips to each marker, and save them to the "markers" var
+                markers = berlin_stations_data.map(station => {
+                    id_to_markers_map[station.idname] = L.marker([station.latitude, station.longitude], {icon: icon})
+                        .bindPopup(pin_popup_info(station))
+                        .bindTooltip("")
+                        .addTo(map);
+                    return id_to_markers_map[station.idname];
+                });
+            });
+
+            // obtain covid data in berlin
+            let covid_berlin = $.get(" {{ url_for('static', filename='berlin_covid.json') }} ", function (data) {
+                berlin_covid = JSON.parse(data);
+            });
+
+            // unused, can ignore
+            // let riders_json = $.get(" {{ url_for('static', filename='berlin_riders_processed.json') }} ", function (data) {
+            //     berlin_riders = data;
+            // });
+
+            // obtain bike rider information in berlin
+            let daily_riders_json = $.get(" {{ url_for('static', filename='berlin_big_table.json') }} ", function (data) {
+                daily_riders = data;
+            });
+
+            // Load and plot Berlin's boroughs (credit: https://github.com/m-hoerz/berlin-shapes/blob/master/berliner-bezirke.geojson)
+            let berlin_json = $.get(" {{ url_for('static', filename='berliner-bezirke.geojson') }} ", function (geojsonFeature) {
+                let geoJSON = JSON.parse(geojsonFeature);
+                let geoJSONinfo = L.geoJSON(geoJSON, {style: {"color": "grey"}}).addTo(map);
+                berlin_districts_polygons = geoJSONinfo.getLayers();
+                berlin_districts_polygons.map((district) => { // add tooltip to each borough
+                    district.bindTooltip(district.feature.properties.spatial_alias, { permanent: true, direction: "center", className: "district-tooltip" });
+                });
+                // to get name of district: berlin_districts_polygons[i].feature.properties.spatial_alias
+            });
+
+            // another auxillary date function that adds a certain amount of days to a date
+            function addDays(date, days) {
+                var result = new Date(date);
+                result.setDate(result.getDate() + days);
+                return result;
+            }
+
+            // Once the data specified has been loaded, initialise the slider
+            $.when(bike_promise, covid_berlin, /* riders_json, */ daily_riders_json, berlin_json).done(function () {
+
+                // JQuery UI slider
+                $("#covid-slider-range").slider({
+                    min: 0, // days since first rider info (2016-01-01)
+                    max: daysBetween("2016-01-01", "2021-09-29"), // amount of days from start to final day of recorded bike statistics
+                    step: 1, // +/- slider value by 1 every time it is moved
+
+                    // what happens when the slider is dragged
+                    slide: function (event, ui) {
+                        let the_day = addDays("2016-01-01", ui.value).toJSON().slice(0, 10); // the date is the number of days passed since the first date (2016-01-01)
+                        $("#starting-date").html(the_day);
+
+                        // if there is covid information for that specific date
+                        if (berlin_covid.hasOwnProperty(the_day)) {
+                            let covid_that_day = berlin_covid[the_day]; // obtain covid info for that day
+                            $("#total-incidence-rate").html(`(Total incidence rate: ${covid_that_day["7_days_incidence"]})`); // show incidence rate
+                            // for each borough, show the corresponding data onto the district's tooltip
+                            for (const [district_name, incidence_rate] of Object.entries(covid_that_day)) {
+                                // find the corresponding polygon on the Leaflet map. This isn't really efficient...
+                                let polygon_of_district = berlin_districts_polygons.find(
+                                    polygon => {
+                                        return (polygon.feature.properties.spatial_alias.toLowerCase().replace("-", "_") == district_name.toLowerCase());
+                                    }
+                                );
+                                // If the corresponding polygon is found, update its covid incidence rate 
+                                if (polygon_of_district) {
+                                    polygon_of_district.unbindTooltip(); // delete previous information
+                                    // if there is incidence rate for that day, show it; otherwise show N/A 
+                                    let new_incidence_rate = incidence_rate ? incidence_rate : "N/A";
+                                    // set new incidence rate information
+                                    polygon_of_district.bindTooltip(
+                                        `${polygon_of_district.feature.properties.spatial_alias}: ${new_incidence_rate}`, 
+                                        { permanent: true, direction: "center", className: "district-tooltip" }
+                                    );
+                                }
+                            }
+                        }
+                        // if there is NO covid information for that day, delete all tooltips for each district 
+                        else {
+                            berlin_districts_polygons.map(polygon_of_district => {
+                                polygon_of_district.unbindTooltip();
+                                polygon_of_district.bindTooltip(`${polygon_of_district.feature.properties.spatial_alias}: N/A`,
+                                    { permanent: true, direction: "center", className: "district-tooltip" }
+                                );
+                            });
+                            $("#total-incidence-rate").html("Total incidence rate: N/A");
+                        }
+
+                        // if there is bike information for that day
+                        if (daily_riders.hasOwnProperty(the_day)) {
+                            let station_info = daily_riders[the_day];
+                            // update bike tooltip on each station
+                            for (const [id, rider_count] of Object.entries(station_info)) {
+                                id_to_markers_map[id].unbindTooltip();
+                                id_to_markers_map[id].bindTooltip(`${id_to_markers_map[id].getPopup()._content}: <b>${rider_count}</b>`,
+                                { permanent: true, direction: "bottom", className: "bike-tooltip" }
+                                );
+                            }
+                        }
+                        // if there is NO bike information for that day, delete all bike tooltips
+                        else {
+                            for (const [id, marker] of Object.entries(id_to_markers_map)) {
+                                marker.unbindTooltip();
+                            }
+                        }
+                    }
+                    
+                });
+                
+                // since the bike statistics is earlier than covid statistics, plot the bike information for the first day
+                for (const [id, rider_count] of Object.entries(daily_riders["2016-01-01"])) {
+                    id_to_markers_map[id].unbindTooltip();
+                    id_to_markers_map[id].bindTooltip(`${id_to_markers_map[id].getPopup()._content}: <b>${rider_count}</b>`,
+                        { permanent: true, direction: "bottom", className: "bike-tooltip" }
+                    );
+                }
+
+                // handler for the "Jump to COVID start" button.
+                $("#jump-to-covid-start").click(() => {
+                    hs = $('#covid-slider-range').slider();
+                    let days_to_covid_start = daysBetween("2016-01-01", "2020-03-16");
+                    hs.slider('value', days_to_covid_start);
+                    // Hack to automatically trigger the slide function: https://stackoverflow.com/a/4095994/16033064
+                    hs.slider('option', 'slide')
+                        .call(hs, null, { handle: $('.ui-slider-handle', hs), value: days_to_covid_start });
+                });
+            });
+        </script>
+    </body>
+</html>
